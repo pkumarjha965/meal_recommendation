@@ -1,0 +1,59 @@
+from datetime import datetime, timedelta
+from airflow import DAG
+from airflow.operators.python_operator import PythonOperator
+# import sys
+# sys.path.insert(0, '/opt/airflow/plugins')
+#
+from meal_predict import suggest_meal
+
+
+
+# Default arguments for the DAG
+default_args = {
+    'owner': 'airflow',
+    'depends_on_past': False,
+    'start_date': datetime(2024, 8, 13),
+    'email_on_failure': False,
+    'email_on_retry': False,
+    'retries': 1,
+    'retry_delay': timedelta(minutes=5),
+    'catchup': False,
+}
+
+# Define the DAG
+dag = DAG(
+    'suggest_next_meal',
+    default_args=default_args,
+    description='This will suggest the next meal for the user',
+    schedule_interval='*/10 * * * *',
+)
+
+
+# Python functions to be used in the tasks
+def say_hello():
+    print("Hello")
+
+
+# create a method which iterate over a list and will pick a an item randomly
+
+
+def suggest_next_meal():
+    print("Suggesting the next meal")
+    suggest_meal()
+
+
+# Define the tasks
+task1 = PythonOperator(
+    task_id='suggest_meal',
+    python_callable=suggest_next_meal,
+    dag=dag,
+)
+
+task2 = PythonOperator(
+    task_id='say_hello',
+    python_callable=say_hello,
+    dag=dag,
+)
+
+# Set up task dependencies
+task1

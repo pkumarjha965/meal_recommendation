@@ -1,0 +1,13 @@
+version: '3'
+
+services:
+  web:
+    build: .
+    ports:
+      - "5000:5000"
+    volumes:
+      - ./menu_items.txt:/app/menu_items.txt
+      - sqlite_data:/app
+
+volumes:
+  sqlite_data:
