@@ -5,6 +5,7 @@ import os
 import dotenv
 from pandas import pandas as pd
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from twilio.rest import Client
 from datetime import datetime, timedelta
 # from flask import Flask, jsonify
@@ -14,7 +15,17 @@ app = FastAPI()
 # Database setup
 
 
-global_cache = {};
+# Add CORS middleware to allow all origins
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Allow all origins
+    allow_credentials=True,
+    allow_methods=["*"],  # Allow all HTTP methods (GET, POST, etc.)
+    allow_headers=["*"],  # Allow all headers
+)
+
+
+global_cache = {}
 
 dotenv.load_dotenv()
 account_sid = os.getenv("account_sid")
@@ -87,6 +98,7 @@ def read_food_items(file_path):
             for line in file:
                 # Split by whitespace example "item name" 5
                 name, weightage = line.strip().rsplit(' ', 1)
+                name = name.strip()
                 items[name] = int(weightage)
         return items
     except Exception as e:
@@ -159,7 +171,7 @@ def printAllItems():
     cursor = conn.cursor()
     menu = []
 
-    cursor.execute('SELECT * FROM food_items')
+    cursor.execute('SELECT * FROM food_items order by weightage desc')
     items = cursor.fetchall()
 
     for name, weightage, original_weightage in items:
@@ -189,7 +201,7 @@ def delete_items_database(items):
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
 
-    for name, weightage in items.items():
+    for name in items:
         # insert if items do not exist
         cursor.execute('''
                     delete from food_items where name =?
@@ -216,18 +228,18 @@ def update_menu_database(items):
 def update_menu():
     old_menu = get_current_menu_from_db()
     new_menu = read_food_items(FILE_PATH)
-    new_items = {}
     update_items = {}
+    non_updated_items = []
     for item, weightage in new_menu.items():
-        if not old_menu.__contains__(item):
-            new_items[item] = weightage
+        if old_menu.__contains__(item):
+            if old_menu[item] == new_menu[item]:
+                non_updated_items.append(item)
         else:
             update_items[item] = weightage
-            del old_menu[item]
 
+    to_be_deleted_items = old_menu.keys() - non_updated_items
+    delete_items_database(to_be_deleted_items)
     update_database(update_items)
-    update_database(new_items)
-    delete_items_database(old_menu)
     return 'updated'
 
 
@@ -236,7 +248,7 @@ def get_menu():
     return printAllItems()
 
 
-@app.get('/suggest_meal')
+@app.get('/suggest_meal/today')
 def suggest_meal():
     todays_date = getTodaysDate()
     # if (global_cache.__contains__(todays_date)):
@@ -257,6 +269,26 @@ def suggest_meal():
     # update cache
     return suggested_meal
 
+@app.get('/suggest_meal/tomorrow')
+def suggest_meal_tomorrow():
+    todays_date = getTodaysDate()
+    # if (global_cache.__contains__(todays_date)):
+    #     return global_cache[todays_date]
+
+    suggested_meal = {}
+    lunch_item = read_next_meal()
+    dinner_item = read_next_meal()
+
+    suggested_meal["lunch"] = lunch_item
+    suggested_meal["dinner"] = dinner_item
+
+    response = {}
+    response[todays_date] = suggested_meal
+    global_cache[todays_date] = response
+
+    print(f"Selected item: {response}")
+    # update cache
+    return suggested_meal
 
 def getTodaysDate():
     return datetime.now().today().strftime('%d-%m-%Y')
@@ -266,7 +298,10 @@ def next_meal():
     selected_item = select_item()
     update_weightages(selected_item, INCREASE_VALUE)
     return selected_item
-
+def read_next_meal():
+    selected_item = select_item()
+    update_weightages(selected_item, INCREASE_VALUE)
+    return selected_item
 
 def force_re_read():
     global LAST_RUN_TIME

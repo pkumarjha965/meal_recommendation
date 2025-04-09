@@ -10,10 +10,10 @@ Aloo palak    27
 Mushroom     18
 Arabi	 12
 Karela        15
-Beans 23
 Aloo Gobi     35
 Chole Bhature 31
 Kheer Puri    34
 Methi Paratha 30
 Aloo matar    30
 Coffee & Crossiant 34
+Sev Tamatar 50
