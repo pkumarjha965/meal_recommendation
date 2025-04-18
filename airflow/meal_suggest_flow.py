@@ -1,15 +1,16 @@
-import json
-import sqlite3
-import random
 import os
+import sqlite3
+from datetime import datetime, timedelta
+
 import dotenv
-from pandas import pandas as pd
+import pytz
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from twilio.rest import Client
-from datetime import datetime, timedelta
+
+import datahandler
+
 # from flask import Flask, jsonify
-import requests
 
 app = FastAPI()
 # Database setup
@@ -24,7 +25,6 @@ app.add_middleware(
     allow_headers=["*"],  # Allow all headers
 )
 
-
 global_cache = {}
 
 dotenv.load_dotenv()
@@ -37,7 +37,7 @@ DB_NAME = "food_items.db"
 META_DB_NAME = "meta.db"
 FILE_PATH = "../airflow/data/menu_items.txt"  # Path to your text file
 RECIPIENT_FILE = "/home/prashant.jha/PycharmProjects/pythonProject/opt/airflow/data/recipients.txt"
-INCREASE_VALUE = 1  # Value to increase weightage by each day
+INCREASE_VALUE = 2  # Value to increase weightage by each day
 APP_NAME = "meal_predict"
 API_URL = "https://api-inference.huggingface.co/models/facebook/mbart-large-50-many-to-many-mmt"
 hugging_face_token = os.getenv("HF_API_KEY")
@@ -66,6 +66,20 @@ def create_table():
         conn.commit()
         conn.close()
 
+        conn = sqlite3.connect(DB_NAME)
+        cursor = conn.cursor()
+
+        cursor.execute('''
+                            CREATE TABLE IF NOT EXISTS meal_history (
+                                date_col varchar(10),
+                                meal_type varchar(10),
+                                item varchar(50),
+                                PRIMARY KEY (date_col, meal_type)
+                            )
+                        ''')
+        conn.commit()
+        conn.close()
+
         conn = sqlite3.connect(META_DB_NAME)
         cursor = conn.cursor()
 
@@ -90,6 +104,23 @@ def create_table():
         print(f"Error creating table: {e}")
 
 
+def reset_menu():
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+
+    cursor.execute('''
+        UPDATE food_items
+        SET weightage = original_weightage
+    ''')
+
+    cursor.execute('''
+        DELETE FROM meal_history where date_col = ?
+    ''', (getTodaysDate(),))
+
+    conn.commit()
+    conn.close()
+
+
 def read_food_items(file_path):
     try:
         items = {}
@@ -97,6 +128,8 @@ def read_food_items(file_path):
         with open(file_path, 'r') as file:
             for line in file:
                 # Split by whitespace example "item name" 5
+                if line.strip() == "":
+                    continue
                 name, weightage = line.strip().rsplit(' ', 1)
                 name = name.strip()
                 items[name] = int(weightage)
@@ -124,13 +157,54 @@ def select_item():
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
 
-    cursor.execute('SELECT name, weightage FROM food_items where weightage = (select max(weightage) from food_items)')
+    cursor.execute(
+        'SELECT name, weightage FROM food_items where weightage = (select max(weightage) from food_items) limit 1')
+    items = cursor.fetchall()
+
+    if not items or len(items) == 0:
+        return None
+    selected_item = items[0][0]
+    return selected_item
+
+
+def getTopTwoMeals():
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    selected_item = []
+    cursor.execute('SELECT name, weightage FROM food_items order by weightage desc limit 2')
     items = cursor.fetchall()
 
     if not items:
         return None
-    selected_item = random.choice(items)[0]
+    for item in items:
+        selected_item.append(item[0])
     return selected_item
+
+
+def getAndUpdateTopTwoMeals():
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    selected_item = []
+    cursor.execute('SELECT name, weightage FROM food_items order by weightage desc limit 2')
+    items = cursor.fetchall()
+
+    if not items:
+        return None
+    for item in items:
+        selected_item.append(item[0])
+
+    update_weightages(selected_item)
+    return selected_item
+
+
+def move_to_meal_history(date, meal_type, item):
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+
+    cursor.execute('INSERT or REPLACE into meal_history (date_col,meal_type,item) values (?,?,?)',
+                   (date, meal_type, item,))
+    conn.commit()
+    conn.close()
 
 
 def update_last_run_time():
@@ -144,23 +218,30 @@ def update_last_run_time():
     conn.close()
 
 
-def update_weightages(selected_item, increase_value):
+def update_weightages(selected_items):
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
 
+    # Convert string into a list.
+    if isinstance(selected_items, str):
+        selected_items = [selected_items]
+
+    placeholder = ','.join('?' * len(selected_items))
+
+    print(f"Selected items: {selected_items}")
     # Reset the selected item's weightage
-    cursor.execute('''
+    cursor.execute(f'''
         UPDATE food_items
         SET weightage = original_weightage
-        WHERE name = ?
-    ''', (selected_item,))
+        WHERE name in ({placeholder})
+    ''', (*selected_items,))
 
     # Increase weightage for non-selected items
-    cursor.execute('''
+    cursor.execute(f'''
         UPDATE food_items
         SET weightage = weightage + ?
-        WHERE name != ?
-    ''', (increase_value, selected_item))
+        WHERE name not in ({placeholder})
+    ''', (INCREASE_VALUE, *selected_items))
 
     conn.commit()
     conn.close()
@@ -175,10 +256,7 @@ def printAllItems():
     items = cursor.fetchall()
 
     for name, weightage, original_weightage in items:
-        row = {}
-        row['name'] = name
-        row['weightage'] = weightage
-        row['original_weightage'] = original_weightage
+        row = {'name': name, 'weightage': weightage, 'original_weightage': original_weightage}
         menu.append(row)
 
     # print(items)
@@ -224,7 +302,7 @@ def update_menu_database(items):
     conn.close()
 
 
-@app.put('/menu')
+@app.put('/api/menu')
 def update_menu():
     old_menu = get_current_menu_from_db()
     new_menu = read_food_items(FILE_PATH)
@@ -238,106 +316,120 @@ def update_menu():
             update_items[item] = weightage
 
     to_be_deleted_items = old_menu.keys() - non_updated_items
+    print(f"Items to be deleted: {to_be_deleted_items}")
+    print(f"Items to be updated: {update_items}")
+
     delete_items_database(to_be_deleted_items)
     update_database(update_items)
+
     return 'updated'
 
 
-@app.get('/menu')
+@app.on_event("startup")
+def startup_event():
+    # create the database and tables if they don't exist
+    create_table()
+    # read food items from file and update the database
+    update_menu()
+    # force_re_read()
+    # force_re_read()
+    # update_last_run_time()
+
+
+@app.get('/api/menu')
 def get_menu():
     return printAllItems()
 
 
-@app.get('/suggest_meal/today')
-def suggest_meal():
+@app.get('/api/reset')
+def reset():
+    # read food items from file and update the database
+    reset_menu()
+    # force_re_read()
+    # force_re_read()
+    # update_last_run_time()
+    return 'reset'
+
+
+@app.get('/api/suggest_meal/today')
+def suggest_meal_today():
     todays_date = getTodaysDate()
     # if (global_cache.__contains__(todays_date)):
     #     return global_cache[todays_date]
+    print(todays_date)
 
-    suggested_meal = {}
-    lunch_item = next_meal()
-    dinner_item = next_meal()
-
-    suggested_meal["lunch"] = lunch_item
-    suggested_meal["dinner"] = dinner_item
+    suggested_meal = get_next_meals(todays_date)
 
     response = {}
     response[todays_date] = suggested_meal
-    global_cache[todays_date] = response
-
+    # global_cache[todays_date] = response
     print(f"Selected item: {response}")
     # update cache
     return suggested_meal
 
-@app.get('/suggest_meal/tomorrow')
+
+@app.get('/api/suggest_meal/tomorrow')
 def suggest_meal_tomorrow():
-    todays_date = getTodaysDate()
+    # todays_date = getTodaysDate()
     # if (global_cache.__contains__(todays_date)):
     #     return global_cache[todays_date]
 
+    #  Pick today's meal first if not picked
+    suggest_meal_today()
     suggested_meal = {}
-    lunch_item = read_next_meal()
-    dinner_item = read_next_meal()
+    menu = getTopTwoMeals()
 
-    suggested_meal["lunch"] = lunch_item
-    suggested_meal["dinner"] = dinner_item
+    suggested_meal["lunch"] = menu[0]
+    suggested_meal["dinner"] = menu[1]
 
-    response = {}
-    response[todays_date] = suggested_meal
-    global_cache[todays_date] = response
+    # response = {}
+    # response[todays_date] = suggested_meal
+    # global_cache[todays_date] = response
 
-    print(f"Selected item: {response}")
+    # print(f"Selected item: {response}")
     # update cache
     return suggested_meal
+
+
+@app.get('/suggest_meal')
+def suggest_meal():
+    # Get the top two meals
+    meals = getAndUpdateTopTwoMeals()
+    # Create a message with the meal suggestions
+    # message = f"Suggested meals for today:\nLunch: {meals[0]}\nDinner: {meals[1]}"
+    # print(message)
+    # Send the message via Twilio.
+    suggested_meal = {"lunch": meals[0], "dinner": meals[1]}
+    return suggested_meal
+
+
+@app.get('/api/meal_history')
+def meal_history():
+    return datahandler.get_meal_history()
+
 
 def getTodaysDate():
-    return datetime.now().today().strftime('%d-%m-%Y')
+    return datetime.now(pytz.timezone('Asia/Kolkata')).strftime('%d-%m-%Y')
+
+def getTomorrowsDate():
+    return (datetime.now(pytz.timezone('Asia/Kolkata')) + timedelta(days=1)).strftime('%d-%m-%Y')
 
 
-def next_meal():
-    selected_item = select_item()
-    update_weightages(selected_item, INCREASE_VALUE)
-    return selected_item
-def read_next_meal():
-    selected_item = select_item()
-    update_weightages(selected_item, INCREASE_VALUE)
-    return selected_item
-
-def force_re_read():
-    global LAST_RUN_TIME
-    # update last_run in db
-    conn = sqlite3.connect(META_DB_NAME)
-    cursor = conn.cursor()
-    # set last_run_time to current time - 1 year
-    last_year_time = datetime.now() - timedelta(days=365)
-    cursor.execute('''
-        UPDATE last_run_details
-        SET last_run_time = ?
-    ''', (last_year_time,))
-    conn.commit()
-    conn.close()
+def get_next_meals(date):
+    meals = datahandler.get_meal_history_for_day(date)
+    if not meals or len(meals) == 0:
+        meals = pick_next_meals()
+    return meals
 
 
-def get_last_run_time():
-    conn = sqlite3.connect(META_DB_NAME)
-    cursor = conn.cursor()
-    cursor.execute('SELECT last_run_time FROM last_run_details where app_name = ?', (APP_NAME,))
-    last_run_time = cursor.fetchone()
-    conn.close()
-    # if last_run is not present in db, set it to current time - 1 year
+# make this method transactional
+def pick_next_meals():
+    items = getAndUpdateTopTwoMeals()
+    todays_date = getTodaysDate()
+    move_to_meal_history(todays_date, 'lunch', items[0])
+    move_to_meal_history(todays_date, 'dinner', items[1])
+    meals = {}
+    meals['lunch'] = items[0]
+    meals['dinner'] = items[1]
+    return meals
 
-    if last_run_time is None:
-        return datetime.now()
-    else:
-        # convert string value last_run_time to datetime object
-        print(last_run_time)
-        last_run_time = datetime.strptime(last_run_time[0], '%Y-%m-%d %H:%M:%S.%f')
-        return last_run_time
-
-# update_menu()
-# update_last_run_time()
-# force_re_read()
-# suggest_meal()
-# printAllItems()
-# if __name__ == "__main__":
-#     app.run(debug=True)

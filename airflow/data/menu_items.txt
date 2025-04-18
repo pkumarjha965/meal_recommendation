@@ -1,19 +1,11 @@
-Aloo Paratha  30
-Matar Panee  30
-Dal Chawal    30
-Bhindi Fry    22
-Chane  25
-Rajma  25
-Mixed veg 28
-Sev Tamatar   25
-Aloo palak    27
-Mushroom     18
-Arabi	 12
-Karela        15
-Aloo Gobi     35
-Chole Bhature 31
-Kheer Puri    34
-Methi Paratha 30
-Aloo matar    30
-Coffee & Crossiant 34
-Sev Tamatar 50
+Aloo Paratha  18
+Chawal Dal, Aloo Bhujiya  16
+Paneer    16
+Baigan Bharta  17
+Chole    15
+Bhindi   14
+Aloo Palak  15
+Karela  16
+spring onion  15
+Aloo Methi  14
+Sev Tamatar 16
